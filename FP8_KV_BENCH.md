@@ -54,7 +54,7 @@ docker run --rm -td --privileged --network=host --ipc=host \
   --name=vllm-test \
   --device /dev/dri:/dev/dri \
   --entrypoint=/bin/bash \
-  vllm-xpu-kernel-0.1.9:latest
+  ghcr.io/kushal2705/vllm-xpu-v0.20-pr41689:latest
 ```
 
 Key bind mounts:
@@ -173,7 +173,9 @@ for large models.
 | `llama33_70b` | `meta-llama/Llama-3.3-70B-Instruct` | TP=4 only | `--quantization fp8` |
 | `qwen25_72b` | `Qwen/Qwen2.5-72B-Instruct` | TP=4 only | `--quantization fp8` |
 | `deepseekr1_70b` | `deepseek-ai/DeepSeek-R1-Distill-Llama-70B` | TP=4 only | `--trust-remote-code --quantization fp8` |
-All models use `--quantization fp8` (FP8 weight quantization). Small models (≤8B)
+| `llama31_fp8` | `nvidia/Llama-3.1-8B-Instruct-FP8` | TP=1 only | _(weights pre-quantized FP8; runs BF16 KV only — FP8 KV skipped)_ |
+
+All models use `--quantization fp8` (FP8 weight quantization) except `llama31_fp8` (weights already statically FP8 — no flag needed). Small models (≤8B)
 fit on one B70 card; mid-size models (14–24B) run TP=1 and/or TP=2; 70B/72B models
 require 4 cards and run TP=4 only.
 
@@ -277,7 +279,7 @@ Use `--all` (sequential) or run models one at a time.
 ```bash
 chmod +x bench_fp8_kv_perf.sh
 
-# Run all 10 models sequentially
+# Run all 11 models (including llama31_fp8); TP=1 in parallel, TP=2 in pairs, TP=4 sequential
 ./bench_fp8_kv_perf.sh
 ./bench_fp8_kv_perf.sh --all    # same as above
 
@@ -342,9 +344,11 @@ more simultaneous users FP8 KV cache can serve within the same SLA envelope.
 
 ### Models and TP assignment
 
-Same as Script 2:
+Same as Script 2 (`gemma4` and `qwen25` run both TP=1 and TP=2; `mistral` TP=2 only; 70B models TP=4 only).
 
-| Shorthand | Model | TP configs | Extra flags |
+All models receive `--quantization fp8` (FP8 weight quantization) via the wildcard in `resolve_extra_args()`. The extra flags column below shows only **model-specific additions** beyond the universal `--quantization fp8`:
+
+| Shorthand | Model | TP configs | Additional flags |
 |---|---|---|---|
 | `llama31` | `meta-llama/Llama-3.1-8B-Instruct` | TP=1 | — |
 | `deepseekr1` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` | TP=1 | `--trust-remote-code` |
@@ -352,10 +356,10 @@ Same as Script 2:
 | `qwen3` | `Qwen/Qwen3-8B` | TP=1 | — |
 | `gemma4` | `google/gemma-4-E4B-it` | TP=1, TP=2 | `--trust-remote-code --attention-backend TRITON_ATTN` |
 | `qwen25` | `Qwen/Qwen2.5-14B-Instruct` | TP=1, TP=2 | — |
-| `mistral` | `mistralai/Mistral-Small-24B-Instruct-2501` | TP=2 only | `--quantization fp8` |
-| `llama33_70b` | `meta-llama/Llama-3.3-70B-Instruct` | TP=4 only | `--quantization fp8` |
-| `qwen25_72b` | `Qwen/Qwen2.5-72B-Instruct` | TP=4 only | `--quantization fp8` |
-| `deepseekr1_70b` | `deepseek-ai/DeepSeek-R1-Distill-Llama-70B` | TP=4 only | `--trust-remote-code --quantization fp8` |
+| `mistral` | `mistralai/Mistral-Small-24B-Instruct-2501` | TP=2 only | — |
+| `llama33_70b` | `meta-llama/Llama-3.3-70B-Instruct` | TP=4 only | — |
+| `qwen25_72b` | `Qwen/Qwen2.5-72B-Instruct` | TP=4 only | — |
+| `deepseekr1_70b` | `deepseek-ai/DeepSeek-R1-Distill-Llama-70B` | TP=4 only | `--trust-remote-code` |
 
 ### KV dtype configs
 
@@ -402,24 +406,29 @@ emit CSV summary (max passing conc + ratio vs bf16)
 
 | File | Contents |
 |---|---|
-| `/tmp/fp8kv_sla/sla_sweep_<TS>.csv` | Every measured point: model, config, tp, concurrency, p99_ttft, p99_tpot, output_tps, sla_pass |
-| `/tmp/fp8kv_sla/sla_summary_<TS>.csv` | Max passing concurrency + ratio vs bf16 per (model, config, tp) |
-| `/tmp/vllm_sla_server_<model>_<config>_tp<N>.log` | vLLM server stdout/stderr |
-| `/tmp/bench_sla_<model>_<config>_tp<N>_c<C>_<TS>.log` | `vllm bench serve` stdout per concurrency point |
+| `/tmp/fp8kv_sla/sla_sweep_<TS>.csv` (host: `~/LLM/fp8kv_sla/`) | Every measured point: model, config, tp, concurrency, p99_ttft, p99_tpot, output_tps, sla_pass |
+| `/tmp/fp8kv_sla/sla_summary_<TS>.csv` (host: `~/LLM/fp8kv_sla/`) | Max passing concurrency + ratio vs bf16 per (model, config, tp) |
+| `/tmp/fp8kv_sla/logs/vllm_sla_server_<model>_<config>_tp<N>.log` | vLLM server stdout/stderr |
+| `/tmp/fp8kv_sla/logs/bench_sla_<model>_<config>_tp<N>_c<C>_<TS>.log` | `vllm bench serve` stdout per concurrency point |
+
+> **Note**: During the run, per-point rows are appended live to `${LOG_DIR}/sla_sweep_<TS>.csv` (`~/LLM/fp8kv_sla/logs/`). At the end, `emit_summary()` consolidates them into the final `~/LLM/fp8kv_sla/sla_sweep_<TS>.csv`.
 
 ### How to run
 
 ```bash
 chmod +x bench_fp8_kv_sla_concurrency.sh
 
-# Run all 10 models (default)
+# Run all 10 models (TP=1 parallel ×4, TP=2 in pairs, TP=4 sequential)
 ./bench_fp8_kv_sla_concurrency.sh
 
-# Single model
-./bench_fp8_kv_sla_concurrency.sh llama31
+# TP=1 models only (pass model names directly — no --phase flag)
+./bench_fp8_kv_sla_concurrency.sh llama31 deepseekr1 gemma3 qwen3
 
-# Specific models
+# TP=2 models only
 ./bench_fp8_kv_sla_concurrency.sh gemma4 qwen25 mistral
+
+# Override KV configs
+./bench_fp8_kv_sla_concurrency.sh --configs fp8 llama31 qwen3
 ```
 
 ### Example summary output
@@ -487,7 +496,7 @@ still fails, the configuration is recorded as `OOM` and the script moves on.
 | Context lengths | 16384, 32768 |
 | Concurrency sweep | 1, 2, 4, 8, 16, 32, 64 |
 | ISL | `ctx_len / 4` (4096 at 16K, 8192 at 32K) |
-| OSL | `ctx_len / 8` (2048 at 16K, 4096 at 32K) |
+| OSL | **512** (capped — prefill capacity focus; uncapped ctx/8 would add 20–40 min per point) |
 | `max_model_len` | `ctx_len` |
 | `max_num_batched_tokens` | `max(ctx_len, 8192)` |
 | `max_num_seq` | 32 |
@@ -522,9 +531,10 @@ emit CSV
 
 | File | Contents |
 |---|---|
-| `/tmp/fp8kv_long_context/long_context_<TS>.csv` | All measured points: model, config, tp, context_length, concurrency, throughput, latency, status |
-| `/tmp/vllm_longctx_server_<model>_<config>_tp<N>_ctx<L>.log` | vLLM server stdout/stderr |
-| `/tmp/bench_longctx_<model>_<config>_tp<N>_ctx<L>_c<C>_<TS>.log` | `vllm bench serve` stdout per point |
+| `/tmp/fp8kv_long_context/long_context_<TS>.csv` (host: `~/LLM/fp8kv_long_context/`) | All measured points (live-appended) |
+| `~/LLM/long_context_<TS>.csv` | Live host copy appended in real time (same data) |
+| `/tmp/fp8kv_long_context/logs/vllm_longctx_server_<model>_<config>_tp<N>_ctx<L>.log` | vLLM server stdout/stderr |
+| `/tmp/fp8kv_long_context/logs/bench_longctx_<model>_<config>_tp<N>_ctx<L>_c<C>_<TS>.log` | `vllm bench serve` stdout per point |
 
 ### CSV columns
 

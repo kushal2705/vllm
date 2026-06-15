@@ -16,7 +16,7 @@ description: >
 | Item | Value |
 |---|---|
 | Container name | `vllm-test` |
-| Container image | `vllm-xpu-kernel-0.1.9:latest` |
+| Container image | `ghcr.io/kushal2705/vllm-xpu-v0.20-pr41689:latest` |
 | Scripts directory | `/home/intel/vllm/` |
 | Results inside container | per-script: `/tmp/fp8kv_perf/`, `/tmp/fp8kv_sla/`, `/tmp/fp8kv_long_context/`, `/tmp/fp8kv_accuracy/`, `/tmp/fp8_kv_sweep/` |
 | Results on host (via /tmp mount) | same names under `~/LLM/` (e.g. `~/LLM/fp8kv_perf/`) |
@@ -46,7 +46,7 @@ docker run --rm -td --privileged --network=host --ipc=host \
   --name=vllm-test \
   --device /dev/dri:/dev/dri \
   --entrypoint=/bin/bash \
-  vllm-xpu-kernel-0.1.9:latest
+  ghcr.io/kushal2705/vllm-xpu-v0.20-pr41689:latest
 ```
 
 > **Note:** The `xpu_cache` bind mount persists the XPU/IGC kernel compilation cache (~125 GB on first run) across container restarts. Without it, every new container pays the full compilation cost.
@@ -56,6 +56,7 @@ docker run --rm -td --privileged --network=host --ipc=host \
 | Shortname | Full HF Model ID | TP | Extra flags |
 |---|---|---|---|
 | `llama31` | `meta-llama/Llama-3.1-8B-Instruct` | 1 | `--quantization fp8` |
+| `llama31_fp8` | `nvidia/Llama-3.1-8B-Instruct-FP8` | 1 | _(weights pre-quantized FP8; BF16 KV only; no `--quantization` needed)_ |
 | `deepseekr1` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` | 1 | `--trust-remote-code --quantization fp8` |
 | `gemma3` | `google/gemma-3-1b-it` | 1 | `--quantization fp8` |
 | `qwen3` | `Qwen/Qwen3-8B` | 1 | `--quantization fp8` |
@@ -66,15 +67,19 @@ docker run --rm -td --privileged --network=host --ipc=host \
 | `qwen25_72b` | `Qwen/Qwen2.5-72B-Instruct` | 4 | `--quantization fp8` |
 | `deepseekr1_70b` | `deepseek-ai/DeepSeek-R1-Distill-Llama-70B` | 4 | `--trust-remote-code --quantization fp8` |
 
+> **TP column** = canonical TP used for accuracy evaluation (`bench_fp8_kv_accuracy.sh`). For throughput, SLA, and long-context benchmarks, `gemma4` and `qwen25` also run TP=1 in addition to TP=2. `llama31_fp8` is only benchmarked in `bench_fp8_kv_perf.sh` and `run_fp8_kv_sweep.sh` (not in accuracy/SLA/long-context scripts).
+
 **Card pinning** (`ZE_AFFINITY_MASK`):
 - TP=1 on card N: `ZE_AFFINITY_MASK=N`
 - TP=2 on cards N,N+1: `ZE_AFFINITY_MASK=N,N+1`
 - TP=4 (70B models): skip `ZE_AFFINITY_MASK` and `--dtype bfloat16` entirely
 
-**Phase grouping** (used by `--phase` flag):
-- Phase 1 → TP=1 models: `llama31 deepseekr1 gemma3 qwen3`
-- Phase 2 → TP=2 models: `gemma4 qwen25 mistral`
+**Phase grouping** (used by `--phase` flag in `bench_fp8_kv_accuracy.sh` and `bench_fp8_kv_long_context.sh`):
+- Phase 1 → TP=1 canonical models: `llama31 deepseekr1 gemma3 qwen3`
+- Phase 2 → TP=2 canonical models: `gemma4 qwen25 mistral`
 - Phase 3 → TP=4 models: `llama33_70b qwen25_72b deepseekr1_70b`
+
+> `bench_fp8_kv_sla_concurrency.sh` does **not** support `--phase`; pass model shortnames directly.
 
 ## Known Findings
 
@@ -92,7 +97,7 @@ docker run --rm -td --privileged --network=host --ipc=host \
 # Default: gemma4 qwen25 mistral (TP=2)
 ./run_fp8_kv_sweep.sh
 
-# All 10 models sequentially
+# All 11 models (including llama31_fp8)
 ./run_fp8_kv_sweep.sh --all
 
 # Specific models
@@ -126,7 +131,7 @@ cat /home/intel/LLM/fp8_kv_sweep/*.summary.txt 2>/dev/null
 **Purpose**: BF16 KV vs FP8 KV throughput across 6 real-world serving scenarios at 8K context.
 
 ```bash
-# Run all 10 models sequentially
+# Run all 11 models (TP=1 parallel, TP=2 pairs, TP=4 sequential; includes llama31_fp8)
 ./bench_fp8_kv_perf.sh
 ./bench_fp8_kv_perf.sh --all    # same as above
 
@@ -158,35 +163,48 @@ cat /tmp/fp8kv_perf/logs/kv_llama31_fp8_tp1.txt
 **Purpose**: Find the highest concurrency each model sustains while meeting: TTFT p99 ≤ 5000 ms AND TPOT p99 ≤ 200 ms.
 
 ```bash
-# Full run all models
+# Full run all 10 models (TP=1 parallel ×4, TP=2 parallel pairs, TP=4 sequential)
 ./bench_fp8_kv_sla_concurrency.sh
 
-# Phase-filtered
-./bench_fp8_kv_sla_concurrency.sh --phase 1
-./bench_fp8_kv_sla_concurrency.sh --phase 2
-./bench_fp8_kv_sla_concurrency.sh --phase 3
+# TP=1 models only
+./bench_fp8_kv_sla_concurrency.sh llama31 deepseekr1 gemma3 qwen3
+
+# TP=2 models only
+./bench_fp8_kv_sla_concurrency.sh gemma4 qwen25 mistral
+
+# TP=4 models only
+./bench_fp8_kv_sla_concurrency.sh llama33_70b qwen25_72b deepseekr1_70b
+
+# Override which KV configs to run
+./bench_fp8_kv_sla_concurrency.sh --configs fp8 llama31 qwen3
 ```
 
-**Output files**:
-- `sla_sweep_{TS}.csv` — every measured concurrency point (host: `/home/intel/LLM/`)
-- `sla_summary_{TS}.csv` — max passing concurrency per model + FP8/BF16 ratio
+> **Note**: `bench_fp8_kv_sla_concurrency.sh` does **not** support `--phase`. Use model shortnames to restrict the run.
+
+**Output files** (container path → host path):
+- `/tmp/fp8kv_sla/sla_sweep_{TS}.csv` → `~/LLM/fp8kv_sla/sla_sweep_{TS}.csv` — every measured concurrency point
+- `/tmp/fp8kv_sla/sla_summary_{TS}.csv` → `~/LLM/fp8kv_sla/sla_summary_{TS}.csv` — max passing concurrency per model + FP8/BF16 ratio
+- `/tmp/fp8kv_sla/logs/vllm_sla_server_{model}_{config}_tp{N}.log` — server logs
 
 **Monitor**:
 ```bash
-watch -n 10 'wc -l /home/intel/LLM/sla_sweep_*.csv | tail -1'
-tail -f /home/intel/LLM/sla_sweep_<TS>.csv
+# Live rows during run (sweep is buffered in LOG_DIR then consolidated at end)
+watch -n 10 'wc -l ~/LLM/fp8kv_sla/logs/sla_sweep_*.csv | tail -1'
+tail -f ~/LLM/fp8kv_sla/logs/sla_sweep_<TS>.csv
 ```
 
 **Common issue**: Empty CSV (0 rows) = script crashed before first write. Check server logs:
 ```bash
-tail -50 /home/intel/LLM/vllm_sla_server_*.log 2>/dev/null | grep -E "ERROR|OOM|killed"
+tail -50 ~/LLM/fp8kv_sla/logs/vllm_sla_server_*.log 2>/dev/null | grep -E "ERROR|OOM|killed"
 ```
 
 ---
 
 ## Script 4: `bench_fp8_kv_long_context.sh` — Long-Context Throughput
 
-**Purpose**: BF16 KV vs FP8 KV throughput at 16K and 32K context. Concurrency sweep at each context length.
+**Purpose**: BF16 KV vs FP8 KV throughput at 16K and 32K context. Concurrency sweep (1–64) at each context length.
+
+ISL = `ctx_len / 4` (4096 at 16K, 8192 at 32K). OSL = **512** (capped — prefill capacity is the focus; uncapped OSL makes each run 20–40 min longer).
 
 ```bash
 ./bench_fp8_kv_long_context.sh --phase 1    # TP=1 models
@@ -197,9 +215,11 @@ tail -50 /home/intel/LLM/vllm_sla_server_*.log 2>/dev/null | grep -E "ERROR|OOM|
 ./bench_fp8_kv_long_context.sh --card 2 --port 8241 mistral
 ```
 
-**Output files**:
-- `long_context_{TS}.csv` on host
-- `longctx_{model}_{config}_tp{N}_ctx{CTX}_c{CONC}_{TS}.json` in container
+**Output files** (container path → host path):
+- `/tmp/fp8kv_long_context/long_context_{TS}.csv` → `~/LLM/fp8kv_long_context/long_context_{TS}.csv` — all measured points (live-appended)
+- Live host copy: `~/LLM/long_context_{TS}.csv` (also appended in real time)
+- `/tmp/fp8kv_long_context/logs/bench_longctx_{model}_{config}_tp{N}_ctx{CTX}_c{CONC}_{TS}.log` — per-point bench logs
+- `/tmp/fp8kv_long_context/logs/vllm_longctx_server_{model}_{config}_tp{N}_ctx{CTX}.log` — server logs
 
 **Monitor**:
 ```bash
@@ -434,7 +454,7 @@ watch -n 15 'wc -l /home/intel/LLM/ruler_summary_*.csv 2>/dev/null | tail -3'
 docker exec vllm-test bash -c 'pgrep -a -f "vllm serve" 2>/dev/null | head -5'
 
 # Tail latest server log for OOM / crash signals
-ls -t /home/intel/LLM/vllm_ruler_server_*.log | head -1 | xargs tail -20
+ls -t ~/LLM/fp8kv_accuracy/logs/vllm_ruler_server_*.log | head -1 | xargs tail -20
 ```
 
 ### 4. Validate Results
@@ -453,10 +473,11 @@ PY
 ### 5. Export Results to Local Machine
 ```bash
 # From your laptop — scp everything off the B70
-scp intel@b70-server-sc-3:/home/intel/LLM/ruler_summary_*.csv     ./results/
-scp intel@b70-server-sc-3:/home/intel/LLM/long_context_*.csv      ./results/
-scp intel@b70-server-sc-3:/home/intel/LLM/sla_summary_*.csv       ./results/
-scp intel@b70-server-sc-3:/home/intel/LLM/sla_sweep_*.csv         ./results/
+scp intel@b70-server-sc-3:/home/intel/LLM/ruler_summary_*.csv                ./results/
+scp intel@b70-server-sc-3:/home/intel/LLM/long_context_*.csv                 ./results/
+scp intel@b70-server-sc-3:/home/intel/LLM/fp8kv_sla/sla_summary_*.csv        ./results/
+scp intel@b70-server-sc-3:/home/intel/LLM/fp8kv_sla/sla_sweep_*.csv          ./results/
+scp intel@b70-server-sc-3:/home/intel/LLM/fp8kv_long_context/long_context_*.csv ./results/
 ```
 
 ---
@@ -470,7 +491,7 @@ The skill itself does not track run state — but the agent can check progress a
 | How many accuracy evals done | `wc -l /home/intel/LLM/ruler_summary_*.csv` (320 rows = phase 1 complete) |
 | Which models finished accuracy | `awk -F, 'NR>1 {print $1","$2}' /home/intel/LLM/ruler_summary_*.csv \| sort -u` |
 | Long-context progress | `wc -l /home/intel/LLM/long_context_*.csv` |
-| SLA sweep progress | `wc -l /home/intel/LLM/sla_sweep_*.csv \| tail -1` |
+| SLA sweep progress | `wc -l ~/LLM/fp8kv_sla/sla_sweep_*.csv \| tail -1` |
 | Active vllm servers | `docker exec vllm-test pgrep -c -f "vllm serve" 2>/dev/null` |
 | Scheduler still running | `docker exec vllm-test pgrep -f "bench_fp8_kv" 2>/dev/null` |
 
