@@ -11,9 +11,10 @@
 # FP8 KV cache halves KV memory vs bf16, enabling ~2x more concurrent sequences.
 #
 # Usage:
-#   bash bench_fp8_kv_perf.sh               # run all 10 models sequentially
+#   bash bench_fp8_kv_perf.sh               # run all 11 models sequentially
 #   bash bench_fp8_kv_perf.sh --all         # same as above
 #   bash bench_fp8_kv_perf.sh llama31 qwen3 # run only these two models
+#   bash bench_fp8_kv_perf.sh --tp 1 qwen25 # qwen25 TP=1 only (skip TP=2)
 #
 # Supported model shorthands:
 #   llama31    → meta-llama/Llama-3.1-8B-Instruct
@@ -112,6 +113,18 @@ resolve_tp_list() {
 # Parse model arguments — each gets a card and port
 # ---------------------------------------------------------------------------
 ALL_MODELS=(llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral llama33_70b qwen25_72b deepseekr1_70b llama31_fp8)
+
+TP_OVERRIDE=""  # when set, restrict every model to this TP only
+
+# Pre-scan for --tp flag before the model list
+_remaining=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --tp) TP_OVERRIDE="$2"; shift 2 ;;
+        *)    _remaining+=("$1"); shift ;;
+    esac
+done
+set -- "${_remaining[@]+"${_remaining[@]}"}"
 
 if [[ $# -eq 0 || "$1" == "--all" ]]; then
     set -- "${ALL_MODELS[@]}"
@@ -298,6 +311,15 @@ run_model_suite() {
     model=$(resolve_model "${model_short}")
     extra_args=$(resolve_extra_args "${model_short}")
     tp_list=$(resolve_tp_list "${model_short}")
+    # --tp override: restrict to a single TP (must be a valid member of tp_list)
+    if [[ -n "${TP_OVERRIDE}" ]]; then
+        if echo "${tp_list}" | grep -qw "${TP_OVERRIDE}"; then
+            tp_list="${TP_OVERRIDE}"
+        else
+            echo "[${model_short}] SKIP: --tp ${TP_OVERRIDE} not in tp_list (${tp_list})"
+            return 0
+        fi
+    fi
 
     echo ""
     echo "[${model_short}] ========================================"
