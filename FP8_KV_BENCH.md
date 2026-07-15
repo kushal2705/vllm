@@ -13,6 +13,35 @@ B-series GPUs (B70) under vLLM XPU.
 
 ---
 
+## Test Methodology
+
+| Dimension | `run_fp8_kv_sweep.sh` | `bench_fp8_kv_perf.sh` | `bench_fp8_kv_sla_concurrency.sh` | `bench_fp8_kv_long_context.sh` | `bench_fp8_kv_accuracy.sh` |
+|---|---|---|---|---|---|
+| **Category** | **Validation / smoke test** | **Throughput & latency** | **SLA-bound concurrency** | **Long-context capacity** | **Accuracy (quality)** |
+| **Primary metric** | KV cache token capacity (BF16 vs FP8) | Req/s, output tok/s, TTFT, TPOT, ITL | Max concurrency passing SLA | Max concurrency at 16K/32K context | RULER task scores (0.0–1.0) |
+| **Pass / fail criteria** | Server starts + single chat completion succeeds | Benchmark completes without crash | TTFT(p99) ≤ 5000 ms **AND** TPOT(p99) ≤ 200 ms | Server starts + bench completes; records `OOM` on failure | Score delta |FP8 − BF16| < 0.01; records `OOM` or `UNSTABLE` on failure |
+| **Models** | 11 (1B–72B range, incl. pre-quantized FP8); default 3 TP=2 models | 11 (1B–72B range, incl. pre-quantized FP8) | 10 (1B–72B range) | 10 (1B–72B range) | 10 (1B–72B range) |
+| **TP configs** | TP=2 only | TP=1, TP=2, TP=4 (model-dependent) | TP=1, TP=2, TP=4 (model-dependent) | TP=1, TP=2, TP=4 (model-dependent) | Canonical TP per model (1, 2, or 4) |
+| **KV dtype configs** | BF16, FP8 | BF16, FP8 | BF16, FP8 | BF16, FP8 | BF16, FP8 |
+| **Context length (`max_model_len`)** | 4096 | 8192 | 4096 | 16384, 32768 | 4096, 16384, 32768 |
+| **Input seq length (ISL)** | N/A (single "Hello" prompt) | 64–7168 (varies by scenario) | 1024 | ctx/4 (4096 or 8192) | Task-dependent (RULER generates) |
+| **Output seq length (OSL)** | 8 tokens | 64–1024 (varies by scenario) | 512 | 512 | Task-dependent |
+| **Concurrency** | 1 (single request) | 16–64 (varies by scenario) | Sweep: 1→2→4→8→16→32→64→128→256 | Sweep: 1→2→4→8→16→32→64 | 1 (sequential via lm_eval) |
+| **Num prompts per point** | 1 | 200–500 (varies by scenario) | Dynamic: `max(min(conc×4, 512), 20)`; floor 64 if conc≥8 | Dynamic: `max(min(conc×2, 64), 8)` | 50 samples (TP=1) or 25 samples (TP=2/4) per task |
+| **Warmup** | None | 3 requests, concurrency 4 | 4 requests, concurrency 4 | 2 requests, concurrency 1 | None (lm_eval handles) |
+| **Weight quantization** | `--quantization fp8` (all models) | `--quantization fp8` (all models) | `--quantization fp8` (all models) | `--quantization fp8` (all models); OOM auto-retry re-adds if missing | `--quantization fp8` (all models); OOM auto-retry re-adds if missing |
+| **`gpu-memory-utilization`** | 0.90 | 0.92 | 0.92 | 0.92 | 0.92 |
+| **`max-num-batched-tokens`** | 8192 | 8192 | 8192 | `max(ctx_len, 8192)` | `max(ctx_len, 8192)` |
+| **`max-num-seq(s)`** | 128 | 64 | 256 | 32 | 2 |
+| **`block-size`** | 64 | 64 | 64 | 64 | 64 |
+| **`no-enable-prefix-caching`** | Yes | Yes | Yes | Yes | Yes |
+| **`no-enable-log-requests`** | No | Yes | Yes | Yes | Yes |
+| **Scheduling** | Sequential (1 model at a time) | Sequential (1 model at a time) | Parallel TP=1 (×4), paired TP=2 (×2), sequential TP=4 | Parallel TP=1 (×4), paired TP=2 (×2), sequential TP=4 | Resource-aware scheduler (greedy card allocation) |
+| **Bench tool** | `curl` (single POST) | `vllm bench serve` | `vllm bench serve` | `vllm bench serve` | `lm-evaluation-harness` (RULER tasks) |
+| **Success indicator** | Capacity ratio ≈ 2.0× | FP8 throughput ≥ BF16 (no regression) | FP8 max_conc / BF16 max_conc ≈ 2.0× | FP8 reaches higher concurrency than BF16 | |delta| < 0.01 across all tasks |
+
+---
+
 ## Background: What is FP8 KV Cache?
 
 During inference, the key-value (KV) cache stores intermediate attention tensors
@@ -173,9 +202,9 @@ for large models.
 | `llama33_70b` | `meta-llama/Llama-3.3-70B-Instruct` | TP=4 only | `--quantization fp8` |
 | `qwen25_72b` | `Qwen/Qwen2.5-72B-Instruct` | TP=4 only | `--quantization fp8` |
 | `deepseekr1_70b` | `deepseek-ai/DeepSeek-R1-Distill-Llama-70B` | TP=4 only | `--trust-remote-code --quantization fp8` |
-| `llama31_fp8` | `nvidia/Llama-3.1-8B-Instruct-FP8` | TP=1 only | _(weights pre-quantized FP8; runs BF16 KV only — FP8 KV skipped)_ |
+| `llama31_fp8` | `nvidia/Llama-3.1-8B-Instruct-FP8` | TP=1 only | _(weights + KV cache pre-quantized FP8 via `hf_quant_config.json`; explicit `--kv-cache-dtype fp8` skipped — already the default)_ |
 
-All models use `--quantization fp8` (FP8 weight quantization) except `llama31_fp8` (weights already statically FP8 — no flag needed). Small models (≤8B)
+All models use `--quantization fp8` (FP8 weight quantization) except `llama31_fp8` (weights and KV cache already statically FP8 via `hf_quant_config.json` — no flags needed). Small models (≤8B)
 fit on one B70 card; mid-size models (14–24B) run TP=1 and/or TP=2; 70B/72B models
 require 4 cards and run TP=4 only.
 
@@ -512,7 +541,7 @@ for each TP in tp_list:
         └── if still OOM: record OOM → skip
       warmup: 2 requests, concurrency 1
       for each concurrency in [1,2,4,8,16,32,64]:
-        vllm bench serve (n_prompts = min(max(conc×2, 16), 256))
+        vllm bench serve (n_prompts = max(min(conc×2, 64), 8))
           → save JSON to RESULT_DIR
         if server died (rc=2): stop sweep
         if bench failed (rc=1): stop sweep

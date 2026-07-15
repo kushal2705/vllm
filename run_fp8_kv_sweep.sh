@@ -98,8 +98,8 @@ resolve_extra_args() {
     case "$1" in
         deepseekr1|deepseekr1_70b) echo "--trust-remote-code --quantization fp8" ;;
         gemma4)             echo "--trust-remote-code --attention-backend TRITON_ATTN --quantization fp8" ;;
-        # nvidia/Llama-3.1-8B-Instruct-FP8: weights already statically quantized to FP8;
-        # no --quantization or --dtype flags needed — vLLM reads dtype from checkpoint config
+        # nvidia/Llama-3.1-8B-Instruct-FP8: weights + KV cache already statically FP8
+        # (hf_quant_config.json has kv_cache_quant_algo=FP8) — no flags needed
         llama31_fp8)        echo "" ;;
         *)                  echo "--quantization fp8" ;;
     esac

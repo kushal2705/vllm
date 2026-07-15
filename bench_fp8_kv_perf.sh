@@ -26,7 +26,7 @@
 #   mistral    → mistralai/Mistral-Small-24B-Instruct-2501
 #   llama33_70b  → meta-llama/Llama-3.3-70B-Instruct       (TP=4)
 #   qwen25_72b   → Qwen/Qwen2.5-72B-Instruct               (TP=4)
-#   llama31_fp8  → nvidia/Llama-3.1-8B-Instruct-FP8       (TP=1, BF16 KV only)
+#   llama31_fp8  → nvidia/Llama-3.1-8B-Instruct-FP8       (TP=1, FP8 KV from checkpoint — explicit fp8 config skipped)
 #
 # Runs directly inside the vllm container (no docker exec needed).
 # Each config: start server → warm up → run 6 scenarios → stop server.
@@ -88,7 +88,8 @@ resolve_extra_args() {
     case "$1" in
         deepseekr1|deepseekr1_70b) echo "--trust-remote-code --quantization fp8" ;;
         gemma4)         echo "--trust-remote-code --attention-backend TRITON_ATTN --quantization fp8" ;;
-        # nvidia/Llama-3.1-8B-Instruct-FP8: weights already statically FP8 — no flags needed
+        # nvidia/Llama-3.1-8B-Instruct-FP8: weights + KV cache already statically FP8
+        # (hf_quant_config.json has kv_cache_quant_algo=FP8) — no flags needed
         llama31_fp8)    echo "" ;;
         *)              echo "--quantization fp8" ;;
     esac
@@ -330,9 +331,10 @@ run_model_suite() {
 
     for tp in ${tp_list}; do
         for config in "${ALL_CONFIGS[@]}"; do
-            # llama31_fp8 has pre-quantized FP8 weights — FP8 KV is redundant, run BF16 KV only
+            # llama31_fp8: checkpoint's hf_quant_config.json sets kv_cache_quant_algo=FP8,
+            # so vLLM already uses FP8 KV by default. Explicit --kv-cache-dtype fp8 is redundant.
             if [[ "${model_short}" == "llama31_fp8" && "${config}" == "fp8" ]]; then
-                echo "[${model_short}] Skipping fp8 KV (weights already FP8)"
+                echo "[${model_short}] Skipping explicit fp8 KV (checkpoint already defaults to FP8 KV)"
                 continue
             fi
             local run_tag="${config}_tp${tp}"
