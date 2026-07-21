@@ -10,7 +10,7 @@
 # Per-model TP:
 #   TP=1: llama31, deepseekr1, gemma3, qwen3
 #   TP=1+2: gemma4, qwen25
-#   TP=2 only: mistral
+#   TP=2 only: mistral, gemma4_31b
 #   TP=4 only: llama33_70b, qwen25_72b, deepseekr1_70b
 #
 # Scheduling:
@@ -49,7 +49,7 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 CSV_SWEEP="${RESULT_DIR}/sla_sweep_${TIMESTAMP}.csv"
 CSV_SUMMARY="${RESULT_DIR}/sla_summary_${TIMESTAMP}.csv"
 
-ALL_MODELS=(llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral llama33_70b qwen25_72b deepseekr1_70b)
+ALL_MODELS=(llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral llama33_70b qwen25_72b deepseekr1_70b gemma4_31b)
 
 # ---------------------------------------------------------------------------
 resolve_model() {
@@ -64,6 +64,7 @@ resolve_model() {
         llama33_70b)    echo "meta-llama/Llama-3.3-70B-Instruct" ;;
         qwen25_72b)     echo "Qwen/Qwen2.5-72B-Instruct" ;;
         deepseekr1_70b) echo "deepseek-ai/DeepSeek-R1-Distill-Llama-70B" ;;
+        gemma4_31b)     echo "google/gemma-4-31B-it" ;;
         *)              echo "UNKNOWN"; return 1 ;;
     esac
 }
@@ -74,6 +75,7 @@ resolve_tp_list() {
         llama33_70b|qwen25_72b|deepseekr1_70b) echo "4" ;;
         gemma4|qwen25) echo "1 2" ;;
         mistral)       echo "2" ;;
+        gemma4_31b)    echo "2" ;;
         *)             echo "1" ;;
     esac
 }
@@ -83,6 +85,7 @@ resolve_extra_args() {
     case "$1" in
         deepseekr1|deepseekr1_70b) echo "--trust-remote-code --quantization fp8" ;;
         gemma4)         echo "--trust-remote-code --attention-backend TRITON_ATTN --quantization fp8" ;;
+        gemma4_31b)     echo "--trust-remote-code --attention-backend FLASH_ATTN --quantization fp8" ;;
         *)              echo "--quantization fp8" ;;
     esac
 }

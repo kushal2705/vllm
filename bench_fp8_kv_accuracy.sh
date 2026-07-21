@@ -52,7 +52,7 @@ CSV_SUMMARY="${RESULT_DIR}/ruler_summary_${TIMESTAMP}.csv"
 # Host-visible copy: /tmp maps to /home/intel/LLM on the host
 CSV_HOST="/tmp/ruler_summary_${TIMESTAMP}.csv"
 
-ALL_MODELS=(llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral llama33_70b qwen25_72b deepseekr1_70b)
+ALL_MODELS=(llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral llama33_70b qwen25_72b deepseekr1_70b gemma4_31b)
 
 # ---------------------------------------------------------------------------
 resolve_model() {
@@ -67,6 +67,7 @@ resolve_model() {
         llama33_70b)    echo "meta-llama/Llama-3.3-70B-Instruct" ;;
         qwen25_72b)     echo "Qwen/Qwen2.5-72B-Instruct" ;;
         deepseekr1_70b) echo "deepseek-ai/DeepSeek-R1-Distill-Llama-70B" ;;
+        gemma4_31b)     echo "google/gemma-4-31B-it" ;;
         *)              echo "UNKNOWN"; return 1 ;;
     esac
 }
@@ -76,7 +77,7 @@ resolve_model() {
 resolve_tp() {
     case "$1" in
         llama33_70b|qwen25_72b|deepseekr1_70b) echo "4" ;;
-        gemma4|qwen25|mistral)                  echo "2" ;;
+        gemma4|qwen25|mistral|gemma4_31b)       echo "2" ;;
         *)                                      echo "1" ;;
     esac
 }
@@ -85,7 +86,8 @@ resolve_tp() {
 resolve_extra_args() {
     case "$1" in
         deepseekr1|deepseekr1_70b) echo "--trust-remote-code --quantization fp8" ;;
-        gemma4)         echo "--trust-remote-code --attention-backend TRITON_ATTN --quantization fp8" ;;
+        gemma4)         echo "--trust-remote-code --attention-backend FLASH_ATTN --quantization fp8" ;;
+        gemma4_31b)     echo "--trust-remote-code --attention-backend FLASH_ATTN --quantization fp8" ;;
         *)              echo "--quantization fp8" ;;
     esac
 }
@@ -142,8 +144,12 @@ start_server() {
     local kv_arg=""
     [[ "${config}" != "bf16" ]] && kv_arg="--kv-cache-dtype ${config}"
 
-    local max_batched=${ctx_len}
-    [[ ${max_batched} -lt 8192 ]] && max_batched=8192
+    # --max-num-batched-tokens deliberately omitted from vllm serve below.
+    # Scaling it with ctx_len (or even fixing it high) forces vLLM to profile
+    # activation memory for a giant-batch forward pass, starving KV cache at
+    # long context (e.g. OOMs at 32K on gemma4_31b TP=2 even though vLLM's own
+    # default lets the same model fit 64K on the same B70x2 hardware via
+    # chunked prefill). Let vLLM pick its own default instead.
 
     # 70B models: skip ZE_AFFINITY_MASK and --dtype bfloat16 (let vLLM auto-detect).
     local ze_prefix=""
@@ -166,7 +172,6 @@ start_server() {
         --max-model-len ${ctx_len} \
         --gpu-memory-utilization 0.92 \
         --enforce-eager \
-        --max-num-batched-tokens ${max_batched} \
         --max-num-seqs 2 \
         --block-size 64 \
         --no-enable-log-requests \

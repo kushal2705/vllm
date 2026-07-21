@@ -20,7 +20,7 @@
 #   TP=4 models: sequential (all 4 cards per model)
 #
 # Shortnames: llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral
-#             llama33_70b qwen25_72b deepseekr1_70b llama31_fp8
+#             llama33_70b qwen25_72b deepseekr1_70b llama31_fp8 gemma4_31b
 # =============================================================================
 set -euo pipefail
 
@@ -39,7 +39,7 @@ READY_TIMEOUT=900
 HEALTHCHECK_INTERVAL=5
 KV_DTYPES=("bf16" "fp8")   # run both by default
 REQUESTED_MODELS=()
-ALL_MODELS=(llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral llama33_70b qwen25_72b deepseekr1_70b llama31_fp8)
+ALL_MODELS=(llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral llama33_70b qwen25_72b deepseekr1_70b llama31_fp8 gemma4_31b)
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -82,13 +82,14 @@ resolve_hf_id() {
         llama33_70b)    echo "meta-llama/Llama-3.3-70B-Instruct" ;;
         qwen25_72b)     echo "Qwen/Qwen2.5-72B-Instruct" ;;
         deepseekr1_70b) echo "deepseek-ai/DeepSeek-R1-Distill-Llama-70B" ;;
+        gemma4_31b)     echo "google/gemma-4-31B-it" ;;
         *)              echo "$1" ;;   # pass through HF IDs directly
     esac
 }
 
 resolve_tp() {
     case "$1" in
-        gemma4|qwen25|mistral)                  echo "2" ;;
+        gemma4|qwen25|mistral|gemma4_31b)        echo "2" ;;
         llama33_70b|qwen25_72b|deepseekr1_70b)  echo "4" ;;
         *)                                       echo "1" ;;
     esac
@@ -98,6 +99,7 @@ resolve_extra_args() {
     case "$1" in
         deepseekr1|deepseekr1_70b) echo "--trust-remote-code --quantization fp8" ;;
         gemma4)             echo "--trust-remote-code --attention-backend TRITON_ATTN --quantization fp8" ;;
+        gemma4_31b)         echo "--trust-remote-code --attention-backend FLASH_ATTN --quantization fp8" ;;
         # nvidia/Llama-3.1-8B-Instruct-FP8: weights + KV cache already statically FP8
         # (hf_quant_config.json has kv_cache_quant_algo=FP8) — no flags needed
         llama31_fp8)        echo "" ;;

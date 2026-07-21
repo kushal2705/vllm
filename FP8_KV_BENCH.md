@@ -844,3 +844,120 @@ ls ~/LLM/fp8kv_sla/
 ls ~/LLM/fp8kv_long_context/
 ls ~/LLM/fp8kv_accuracy/
 ```
+
+---
+
+## Accuracy benchmark: container setup for new vLLM images
+
+`bench_fp8_kv_accuracy.sh` uses `lm-evaluation-harness` with the RULER task
+suite. The script auto-installs missing Python packages, but two issues require
+manual one-time setup when running in a **new container image**:
+
+### 1. Python dependencies
+
+The script installs these automatically on first run (via `pip install --quiet`):
+
+```
+lm-eval[api]    # lm-evaluation-harness with API model support
+nltk            # tokenization for RULER tasks
+rouge-score     # scoring
+scikit-learn    # metrics
+sentencepiece   # tokenizer fallback
+tiktoken        # tokenizer fallback
+```
+
+If `lm_eval` does not include RULER tasks, install from source:
+
+```bash
+pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git
+```
+
+NLTK data (`punkt`, `punkt_tab`, `stopwords`) is downloaded automatically.
+
+### 2. HotPotQA dataset (RULER QA tasks)
+
+The RULER `ruler_qa_hotpot` task downloads HotPotQA from
+`http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json`.
+This server is **unreliable** (frequently returns 504). If it's down, RULER
+fails at task initialization.
+
+**Fix**: Pre-populate the file from HuggingFace datasets and patch `qa_utils.py`
+to read it locally:
+
+```bash
+# Step 1: Reconstruct the JSON from HuggingFace (inside the container)
+python3 -c "
+import json
+from datasets import load_dataset
+
+ds = load_dataset('hotpot_qa', 'distractor', split='validation')
+data = []
+for row in ds:
+    context = list(zip(row['context']['title'], row['context']['sentences']))
+    data.append({
+        'question': row['question'],
+        'answer': row['answer'],
+        'type': row['type'],
+        'level': row['level'],
+        'supporting_facts': row['supporting_facts'],
+        'context': context,
+    })
+with open('/tmp/hotpot_dev_distractor_v1.json', 'w') as f:
+    json.dump(data, f)
+print(f'Wrote {len(data)} entries')
+"
+
+# Step 2: Patch lm_eval's qa_utils.py to use local file fallback
+python3 -c "
+qa_file = '/opt/venv/lib/python3.12/site-packages/lm_eval/tasks/ruler/qa_utils.py'
+with open(qa_file) as f:
+    content = f.read()
+
+old = '''@cache
+def download_json(url) -> dict:
+    response = requests.get(url)
+    response.raise_for_status()
+    data = response.json()
+    return data'''
+
+new = '''@cache
+def download_json(url) -> dict:
+    import json as _json
+    from pathlib import Path
+    local_map = {
+        'http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json': '/tmp/hotpot_dev_distractor_v1.json',
+    }
+    local_path = local_map.get(url)
+    if local_path and Path(local_path).exists():
+        with open(local_path) as _f:
+            return _json.load(_f)
+    response = requests.get(url)
+    response.raise_for_status()
+    data = response.json()
+    return data'''
+
+if old in content:
+    content = content.replace(old, new)
+    with open(qa_file, 'w') as f:
+        f.write(content)
+    print('Patched qa_utils.py')
+else:
+    print('ERROR: patch target not found (lm_eval version may differ)')
+"
+```
+
+**Verification**:
+
+```bash
+python3 -c "
+from lm_eval.tasks.ruler.qa_utils import read_hotpotqa
+qas, docs = read_hotpotqa()
+print(f'HotPotQA: {len(qas)} QAs, {len(docs)} docs — OK')
+"
+```
+
+> **Note**: The `/tmp/hotpot_dev_distractor_v1.json` file persists on the host at
+> `~/LLM/hotpot_dev_distractor_v1.json` via the bind mount. It only needs to be
+> regenerated if the container's `/tmp` is not mounted to a persistent directory.
+> The `qa_utils.py` patch is container-local and must be re-applied after
+> recreating the container.

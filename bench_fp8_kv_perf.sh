@@ -27,6 +27,7 @@
 #   llama33_70b  → meta-llama/Llama-3.3-70B-Instruct       (TP=4)
 #   qwen25_72b   → Qwen/Qwen2.5-72B-Instruct               (TP=4)
 #   llama31_fp8  → nvidia/Llama-3.1-8B-Instruct-FP8       (TP=1, FP8 KV from checkpoint — explicit fp8 config skipped)
+#   gemma4_31b   → google/gemma-4-31B-it                  (TP=2, FLASH_ATTN)
 #
 # Runs directly inside the vllm container (no docker exec needed).
 # Each config: start server → warm up → run 6 scenarios → stop server.
@@ -80,6 +81,7 @@ resolve_model() {
         llama33_70b)    echo "meta-llama/Llama-3.3-70B-Instruct" ;;
         qwen25_72b)     echo "Qwen/Qwen2.5-72B-Instruct" ;;
         deepseekr1_70b) echo "deepseek-ai/DeepSeek-R1-Distill-Llama-70B" ;;
+        gemma4_31b)     echo "google/gemma-4-31B-it" ;;
         *)              echo "UNKNOWN"; return 1 ;;
     esac
 }
@@ -88,6 +90,7 @@ resolve_extra_args() {
     case "$1" in
         deepseekr1|deepseekr1_70b) echo "--trust-remote-code --quantization fp8" ;;
         gemma4)         echo "--trust-remote-code --attention-backend TRITON_ATTN --quantization fp8" ;;
+        gemma4_31b)     echo "--trust-remote-code --attention-backend FLASH_ATTN --quantization fp8" ;;
         # nvidia/Llama-3.1-8B-Instruct-FP8: weights + KV cache already statically FP8
         # (hf_quant_config.json has kv_cache_quant_algo=FP8) — no flags needed
         llama31_fp8)    echo "" ;;
@@ -105,6 +108,7 @@ resolve_tp_list() {
         llama33_70b|qwen25_72b|deepseekr1_70b) echo "4" ;;
         gemma4|qwen25) echo "1 2" ;;
         mistral)       echo "2" ;;
+        gemma4_31b)    echo "2" ;;
         llama31_fp8)   echo "1" ;;
         *)             echo "1" ;;
     esac
@@ -113,7 +117,7 @@ resolve_tp_list() {
 # ---------------------------------------------------------------------------
 # Parse model arguments — each gets a card and port
 # ---------------------------------------------------------------------------
-ALL_MODELS=(llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral llama33_70b qwen25_72b deepseekr1_70b llama31_fp8)
+ALL_MODELS=(llama31 deepseekr1 gemma3 qwen3 gemma4 qwen25 mistral llama33_70b qwen25_72b deepseekr1_70b llama31_fp8 gemma4_31b)
 
 TP_OVERRIDE=""  # when set, restrict every model to this TP only
 
@@ -133,7 +137,7 @@ fi
 MODEL_SHORTS=("$@")
 for ms in "${MODEL_SHORTS[@]}"; do
     if ! resolve_model "${ms}" > /dev/null 2>&1; then
-        echo "Unknown model: ${ms}. Choose from: llama31, llama31_fp8, deepseekr1, gemma3, gemma4, qwen3, qwen25, mistral, llama33_70b, qwen25_72b, deepseekr1_70b"; exit 1
+        echo "Unknown model: ${ms}. Choose from: llama31, llama31_fp8, deepseekr1, gemma3, gemma4, qwen3, qwen25, mistral, llama33_70b, qwen25_72b, deepseekr1_70b, gemma4_31b"; exit 1
     fi
 done
 
@@ -178,7 +182,6 @@ start_server() {
         --max-model-len ${MAX_MODEL_LEN} \
         --gpu-memory-utilization 0.92 \
         --enforce-eager \
-        --max-num-batched-tokens 8192 \
         --max-num-seq 64 \
         --block-size 64 \
         --no-enable-log-requests \
